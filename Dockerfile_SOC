@@ -1,0 +1,36 @@
+# =============================================================================
+#
+# @package    RPi5 netmonitor containers
+# @container  netmonitor
+# @name       Dockerfile
+# @purpose    Container definition
+# @version    v0.0.1  2026-01-15
+# @author     pierre@amultis.dev
+# @copyright  (C) Pierre Veelen
+#
+# =============================================================================
+FROM python:3.11-slim
+
+# Update, upgrade and install required packages
+RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools traceroute iputils-ping -y
+
+WORKDIR /app
+
+RUN pip3 install --upgrade pip
+
+# First set and install required packages for optimal cache
+COPY ./netmonitor/py_app/requirements/ /app/py_app/requirements/
+RUN pip3 install --requirement /app/py_app/requirements/requirements.txt
+
+# Now instal program files and folders
+COPY ./netmonitor/py_app/ /app/py_app
+
+#EXPOSE 8080/udp
+
+# for debug and test mode
+# =======================
+CMD ["tail", "-f", "/dev/null"]
+
+# for production mode
+# =======================
+#CMD ["python", "/app/py_app/netmonitor.py"]
