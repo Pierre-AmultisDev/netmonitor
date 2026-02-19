@@ -19,11 +19,11 @@ WORKDIR /app
 RUN pip3 install --upgrade pip
 
 # First set and install required packages for optimal cache
-COPY ./netmonitor/py_app/requirements/ /app/py_app/requirements/
-RUN pip3 install --requirement /app/py_app/requirements/requirements.txt
+COPY ./netmonitor/requirements.txt /app/requirements.txt
+RUN pip3 install --requirement /app/requirements.txt
 
 # Now instal program files and folders
-COPY ./netmonitor/py_app/ /app/py_app
+COPY ./netmonitor/ /app
 
 #EXPOSE 8080/udp
 
