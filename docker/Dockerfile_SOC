@@ -4,22 +4,24 @@
 # @container  netmonitor (complete installation)
 # @name       Dockerfile
 # @purpose    Container definition
-# @version    v0.0.1  2026-01-15
+# @version    v0.0.2  2026-01-15
 # @author     pierre@amultis.dev
 # @copyright  (C) Pierre Veelen
 #
 # =============================================================================
 FROM ubuntu:24.04
 
-# Update, upgrade and install required packages
-RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools traceroute iputils-ping -y
+# Update, upgrade and install required baseline packages for network testing and editing
+RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools traceroute iproute2 iputils-ping -y
+
+# install required packages for netmonitor install_complet.sh script
+RUN apt-get install iproute2 -y
 
 WORKDIR /opt/netmonitor
 
 COPY ./netmonitor/ /opt/netmonitor
 
 RUN /opt/netmonitor/install_complete.sh 
-
 
 #EXPOSE 8080/udp
 
