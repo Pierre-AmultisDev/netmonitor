@@ -23,7 +23,7 @@ RUN /opt/netmonitor/install_complete.sh
 
 #EXPOSE 8080/udp
 
- for debug and test mode
+# for debug and test mode
 # =======================
 CMD ["tail", "-f", "/dev/null"]
 
