@@ -4,12 +4,15 @@
 # @container  netmonitor (complete installation)
 # @name       Dockerfile
 # @purpose    Container definition
-# @version    v0.0.2  2026-01-15
+# @version    v0.0.3  2026-02-19
 # @author     pierre@amultis.dev
 # @copyright  (C) Pierre Veelen
 #
 # =============================================================================
 FROM ubuntu:24.04
+
+# Prevent interactive prompts from apt-get 
+ENV DEBIAN_FRONTEND=noninteractive 
 
 # Update, upgrade and install required baseline packages for network testing and editing
 RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools traceroute iproute2 iputils-ping -y
