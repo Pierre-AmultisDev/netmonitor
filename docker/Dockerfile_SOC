@@ -4,15 +4,15 @@
 # @container  netmonitor (complete installation)
 # @name       Dockerfile
 # @purpose    Container definition
-# @version    v0.0.4  2026-02-20
+# @version    v0.0.5  2026-02-20
 # @author     pierre@amultis.dev
 # @copyright  (C) Pierre Veelen
 #
 # =============================================================================
 FROM ubuntu:24.04
 
-# Prevent interactive prompts from apt-get 
-ENV DEBIAN_FRONTEND=noninteractive 
+# Prevent interactive prompts 
+#ENV DEBIAN_FRONTEND=noninteractive 
 
 # Let install script know it is not running on bare server but in docker
 ENV IS_DOCKER=true
@@ -27,13 +27,13 @@ WORKDIR /opt/netmonitor
 
 COPY ./netmonitor/ /opt/netmonitor
 
-RUN /opt/netmonitor/install_complete.sh 
+#RUN /opt/netmonitor/install_complete.sh 
 
 #EXPOSE 8080/udp
 
 # for debug and test mode
 # =======================
-CMD ["tail", "-f", "/dev/null"]
+CMD ["sleep", "infinity"]
 
 # for production mode
 # =======================
