@@ -191,28 +191,29 @@ echo_header "Cleaning Up Old/Legacy Services"
 cleanup_service() {
     local service_name="$1"
     local reason="$2"
+    if [ "$IS_DOCKER" = "false" ]; then
+        if systemctl list-unit-files | grep -q "^$service_name"; then
+            echo_info "Found legacy service: $service_name"
+            echo_warning "Reason: $reason"
 
-    if systemctl list-unit-files | grep -q "^$service_name"; then
-        echo_info "Found legacy service: $service_name"
-        echo_warning "Reason: $reason"
+            # Stop service if running
+            if systemctl is-active --quiet "$service_name"; then
+                echo_info "Stopping $service_name..."
+                systemctl stop "$service_name" 2>/dev/null || true
+            fi
 
-        # Stop service if running
-        if systemctl is-active --quiet "$service_name"; then
-            echo_info "Stopping $service_name..."
-            systemctl stop "$service_name" 2>/dev/null || true
-        fi
+            # Disable service if enabled
+            if systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
+                echo_info "Disabling $service_name..."
+                systemctl disable "$service_name" 2>/dev/null || true
+            fi
 
-        # Disable service if enabled
-        if systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
-            echo_info "Disabling $service_name..."
-            systemctl disable "$service_name" 2>/dev/null || true
-        fi
-
-        # Remove service file
-        if [ -f "/etc/systemd/system/$service_name" ]; then
-            echo_info "Removing /etc/systemd/system/$service_name..."
-            rm -f "/etc/systemd/system/$service_name"
-            echo_success "$service_name removed"
+            # Remove service file
+            if [ -f "/etc/systemd/system/$service_name" ]; then
+                echo_info "Removing /etc/systemd/system/$service_name..."
+                rm -f "/etc/systemd/system/$service_name"
+                echo_success "$service_name removed"
+            fi
         fi
     fi
 }

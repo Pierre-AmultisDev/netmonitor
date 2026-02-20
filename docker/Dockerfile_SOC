@@ -4,7 +4,7 @@
 # @container  netmonitor (complete installation)
 # @name       Dockerfile
 # @purpose    Container definition
-# @version    v0.0.3  2026-02-19
+# @version    v0.0.4  2026-02-20
 # @author     pierre@amultis.dev
 # @copyright  (C) Pierre Veelen
 #
@@ -21,7 +21,7 @@ ENV IS_DOCKER=true
 RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools traceroute iproute2 iputils-ping -y
 
 # install required packages for netmonitor install_complete.sh script
-RUN apt-get install iproute2 -y
+RUN apt-get install iproute2 lsb-release -y
 
 WORKDIR /opt/netmonitor
 
