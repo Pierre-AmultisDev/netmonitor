@@ -33,7 +33,7 @@ COPY ./netmonitor/ /opt/netmonitor
 
 #RUN /opt/netmonitor/install_complete.sh 
 
-#EXPOSE 8080/udp
+EXPOSE 8080 8181
 
 # for debug and test mode
 # =======================
