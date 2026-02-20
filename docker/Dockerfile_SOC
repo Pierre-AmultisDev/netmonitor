@@ -20,9 +20,11 @@ RUN apt-get update && apt-get upgrade -y && apt-get install nano net-tools trace
 # install required packages for netmonitor install_complete.sh script
 RUN apt-get install iproute2 lsb-release -y
 
+ENV DEBIAN_FRONTEND=noninteractive
 # explicitly set timezone data in this container
+# use TZ variable from docker-compose
 RUN apt-get install tzdata -y \
-    && ln -fs /usr/share/zoneinfo/$TZ /etc/localtime \
+    && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata
 
 WORKDIR /opt/netmonitor
