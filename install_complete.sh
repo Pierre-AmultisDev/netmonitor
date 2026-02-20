@@ -363,7 +363,9 @@ install_timescaledb() {
     timescaledb-tune --quiet --yes >> $LOG_FILE 2>&1
 
     # Restart PostgreSQL
-    systemctl restart postgresql
+	if [ "$IS_DOCKER" = "false" ]; then
+        systemctl restart postgresql
+    fi
     print_success "TimescaleDB geïnstalleerd"
 }
 
@@ -375,8 +377,10 @@ setup_database() {
     print_header "STAP 3/12: Database Setup"
 
     # Start PostgreSQL
-    systemctl start postgresql
-    systemctl enable postgresql
+    if [ "$IS_DOCKER" = "false" ]; then
+        systemctl start postgresql
+        systemctl enable postgresql
+    fi
     print_success "PostgreSQL gestart"
 
     # Check if database already exists
@@ -459,7 +463,13 @@ install_netmonitor() {
     source venv/bin/activate
     pip install --upgrade pip >> $LOG_FILE 2>&1
     pip install -r requirements.txt >> $LOG_FILE 2>&1
-    print_success "Python dependencies geïnstalleerd"
+	
+	if [ "$IS_DOCKER" = "true" ]; then
+	    echo DOCKER: List installed Python packages for verification >> $LOG_FILE 2>&1
+	    pip list >> $LOG_FILE 2>&1
+    fi
+	
+	print_success "Python dependencies geïnstalleerd"
 
     # Create directories
     mkdir -p /var/log/netmonitor
