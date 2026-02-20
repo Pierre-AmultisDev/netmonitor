@@ -465,8 +465,8 @@ install_netmonitor() {
     pip install -r requirements.txt >> $LOG_FILE 2>&1
 	
 	if [ "$IS_DOCKER" = "true" ]; then
-	    echo DOCKER: List installed Python packages for verification >> $LOG_FILE 2>&1
-	    pip list >> $LOG_FILE 2>&1
+	    echo DOCKER: List installed Python packages for verification
+	    pip list
     fi
 	
 	print_success "Python dependencies geïnstalleerd"
