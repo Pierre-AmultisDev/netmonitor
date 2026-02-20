@@ -11,9 +11,6 @@
 # =============================================================================
 FROM ubuntu:24.04
 
-# Prevent interactive prompts 
-#ENV DEBIAN_FRONTEND=noninteractive 
-
 # Let install script know it is not running on bare server but in docker
 ENV IS_DOCKER=true
 

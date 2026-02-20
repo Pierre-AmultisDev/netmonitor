@@ -33,6 +33,9 @@
 # in Dockefile_SOC include:
 # ENV IS_DOCKER=true
 IS_DOCKER=${IS_DOCKER:-false}
+if [ "$IS_DOCKER" = "true" ]; then
+	export DEBIAN_FRONTEND=noninteractive  # onderdrukt apt-get prompts tijdens docker installatie
+fi
 
 # Colors for output
 RED='\033[0;31m'
