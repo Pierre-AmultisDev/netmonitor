@@ -21,3 +21,7 @@ tabulate>=0.9.0
 # Legacy SSE/HTTP Server Dependencies (backwards compatibility)
 starlette>=0.27.0
 sse-starlette>=1.6.0
+
+# Added for docker support
+python-dotenv
+httpx-file
