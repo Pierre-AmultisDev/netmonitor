@@ -1112,11 +1112,13 @@ main() {
     echo "  - Bestaande .env waarden worden gebruikt als defaults"
     echo "  - Log file: $LOG_FILE"
     echo
-    read -p "Doorgaan met installatie? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_info "Installatie geannuleerd"
-        exit 0
+
+    if [ "$IS_DOCKER" = "false" ]; then
+        read -p "Doorgaan met installatie? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
 
     # Run installation steps with error handling
