@@ -1,6 +1,10 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2025 Willem M. Poort
+#
+# Docker additions 
+# Copyright (c) Pierre Veelen
+#
 # ============================================================================
 # NetMonitor Service Installation Script
 # ============================================================================
@@ -219,10 +223,12 @@ LEGACY_SERVICES=()
 
 # If switching FROM embedded TO gunicorn, no cleanup needed (dashboard just moves)
 # If switching FROM gunicorn TO embedded, cleanup dashboard service
-if [ "$DASHBOARD_SERVER" = "embedded" ]; then
-    if systemctl list-unit-files | grep -q "^netmonitor-dashboard.service"; then
-        echo_warning "Switching from gunicorn to embedded mode"
-        cleanup_service "netmonitor-dashboard.service" "Switching to embedded dashboard (dashboard now runs in netmonitor.service)"
+if [ "$IS_DOCKER" = "false" ]; then
+    if [ "$DASHBOARD_SERVER" = "embedded" ]; then
+        if systemctl list-unit-files | grep -q "^netmonitor-dashboard.service"; then
+            echo_warning "Switching from gunicorn to embedded mode"
+            cleanup_service "netmonitor-dashboard.service" "Switching to embedded dashboard (dashboard now runs in netmonitor.service)"
+        fi
     fi
 fi
 
@@ -232,10 +238,12 @@ for legacy_service in "${LEGACY_SERVICES[@]}"; do
 done
 
 # Reload systemd after cleanup
-if [ ${#LEGACY_SERVICES[@]} -gt 0 ] || [ "$DASHBOARD_SERVER" = "embedded" ]; then
-    echo_info "Reloading systemd after cleanup..."
-    systemctl daemon-reload
-    echo ""
+if [ "$IS_DOCKER" = "false" ]; then
+    if [ ${#LEGACY_SERVICES[@]} -gt 0 ] || [ "$DASHBOARD_SERVER" = "embedded" ]; then
+        echo_info "Reloading systemd after cleanup..."
+        systemctl daemon-reload
+        echo ""
+    fi
 fi
 
 echo_success "Service cleanup completed"
@@ -364,10 +372,12 @@ echo ""
 # Systemd Reload
 # ============================================================================
 
-echo_info "Reloading systemd daemon..."
-systemctl daemon-reload
-echo_success "Systemd daemon reloaded"
-echo ""
+if [ "$IS_DOCKER" = "false" ]; then
+    echo_info "Reloading systemd daemon..."
+    systemctl daemon-reload
+    echo_success "Systemd daemon reloaded"
+    echo ""
+fi
 
 # ============================================================================
 # Service Enablement
@@ -407,31 +417,33 @@ enable_service() {
     echo ""
 }
 
-# Check if running in auto-confirm mode (used by install_complete.sh)
-AUTO_ENABLE="false"
-if [ "$AUTO_CONFIRM" = "yes" ] || [ "$AUTO_CONFIRM" = "true" ]; then
-    AUTO_ENABLE="true"
-    echo_info "Running in auto-confirm mode - services will be enabled automatically"
-    echo ""
+if [ "$IS_DOCKER" = "false" ]; then
+    # Check if running in auto-confirm mode (used by install_complete.sh)
+    AUTO_ENABLE="false"
+    if [ "$AUTO_CONFIRM" = "yes" ] || [ "$AUTO_CONFIRM" = "true" ]; then
+        AUTO_ENABLE="true"
+        echo_info "Running in auto-confirm mode - services will be enabled automatically"
+        echo ""
+    fi
+
+    # Enable main service
+    enable_service "netmonitor.service" "NetMonitor Main Service" "$AUTO_ENABLE"
+
+    # Enable dashboard service (if installed)
+    if [ "$DASHBOARD_SERVER" = "gunicorn" ]; then
+        enable_service "netmonitor-dashboard.service" "Web Dashboard (Gunicorn)" "$AUTO_ENABLE"
+    fi
+
+    # Enable MCP HTTP API (if installed)
+    if [ "$MCP_API_ENABLED" = "true" ]; then
+        enable_service "netmonitor-mcp-streamable.service" "MCP Streamable HTTP" "$AUTO_ENABLE"
+        # Skipping netmonitor-openwebui-rest.service (deprecated - see above)
+        # enable_service "netmonitor-openwebui-rest.service" "Open-WebUI REST Wrapper" "$AUTO_ENABLE"
+    fi
+
+    # Enable feed update timer
+    enable_service "netmonitor-feed-update.timer" "Threat Feed Update Timer" "$AUTO_ENABLE"
 fi
-
-# Enable main service
-enable_service "netmonitor.service" "NetMonitor Main Service" "$AUTO_ENABLE"
-
-# Enable dashboard service (if installed)
-if [ "$DASHBOARD_SERVER" = "gunicorn" ]; then
-    enable_service "netmonitor-dashboard.service" "Web Dashboard (Gunicorn)" "$AUTO_ENABLE"
-fi
-
-# Enable MCP HTTP API (if installed)
-if [ "$MCP_API_ENABLED" = "true" ]; then
-    enable_service "netmonitor-mcp-streamable.service" "MCP Streamable HTTP" "$AUTO_ENABLE"
-    # Skipping netmonitor-openwebui-rest.service (deprecated - see above)
-    # enable_service "netmonitor-openwebui-rest.service" "Open-WebUI REST Wrapper" "$AUTO_ENABLE"
-fi
-
-# Enable feed update timer
-enable_service "netmonitor-feed-update.timer" "Threat Feed Update Timer" "$AUTO_ENABLE"
 
 # ============================================================================
 # Installation Summary

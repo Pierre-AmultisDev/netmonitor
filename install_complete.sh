@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2025 Willem M. Poort
 #
+# Docker additions 
+# Copyright (c) Pierre Veelen
+#
 # NetMonitor SOC - Complete Installation Script
 # Version: 2.3.0
 # Installs: PostgreSQL, TimescaleDB, NetMonitor, Web Auth, MCP API, Nginx
@@ -25,6 +28,11 @@
 
 # Don't use set -e globally - we handle errors manually for better user feedback
 # set -e would exit immediately on any error, hiding the actual problem from users
+
+# Docker support
+# in Dockefile_SOC include:
+# ENV IS_DOCKER=true
+IS_DOCKER=${IS_DOCKER:-false}
 
 # Colors for output
 RED='\033[0;31m'
