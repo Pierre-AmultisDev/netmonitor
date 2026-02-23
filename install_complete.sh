@@ -894,27 +894,30 @@ setup_systemd_services() {
         return 1
     fi
 
-    # Start main service
-    systemctl start netmonitor >> $LOG_FILE 2>&1
-    print_success "NetMonitor service gestart"
+    if [ "$IS_DOCKER" = "true" ]; then
+        # Start main service
+        systemctl start netmonitor >> $LOG_FILE 2>&1
+        print_success "NetMonitor service gestart"
 
-    # Start feed update timer
-    systemctl start netmonitor-feed-update.timer >> $LOG_FILE 2>&1
-    print_success "Feed update timer gestart"
+        # Start feed update timer
+        systemctl start netmonitor-feed-update.timer >> $LOG_FILE 2>&1
+        print_success "Feed update timer gestart"
 
-    # Start MCP API if enabled
-    if [[ $MCP_API_ENABLED == "true" ]]; then
-        systemctl start netmonitor-mcp-http >> $LOG_FILE 2>&1
-        print_success "MCP API service gestart"
-    fi
+        # Start MCP API if enabled
+        if [[ $MCP_API_ENABLED == "true" ]]; then
+            systemctl start netmonitor-mcp-http >> $LOG_FILE 2>&1
+            print_success "MCP API service gestart"
+        fi
 
-    # Check status
-    sleep 2
-    if systemctl is-active --quiet netmonitor; then
-        print_success "NetMonitor draait!"
-    else
-        print_error "NetMonitor failed to start - check logs:"
-        echo "  sudo journalctl -u netmonitor -n 50"
+        # Check status
+        sleep 2
+
+        if systemctl is-active --quiet netmonitor; then
+            print_success "NetMonitor draait!"
+        else
+            print_error "NetMonitor failed to start - check logs:"
+            echo "  sudo journalctl -u netmonitor -n 50"
+        fi
     fi
 }
 
