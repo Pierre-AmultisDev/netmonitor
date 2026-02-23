@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2025 Willem M. Poort
 #
-# Docker additions 
+# Docker additions
 # Copyright (c) Pierre Veelen
 #
 # NetMonitor SOC - Complete Installation Script
@@ -34,7 +34,7 @@
 # ENV IS_DOCKER=true
 IS_DOCKER=${IS_DOCKER:-false}
 if [ "$IS_DOCKER" = "true" ]; then
-	export DEBIAN_FRONTEND=noninteractive  # onderdrukt apt-get prompts tijdens docker installatie
+	export DEBIAN_FRONTEND=noninteractive  # onderdrukt apt-get prompts tijdens installatie
 fi
 
 # Colors for output
@@ -263,8 +263,15 @@ prompt_config() {
     # Components
     echo
     print_info "Welke componenten wil je installeren?"
-    read -p "PostgreSQL + TimescaleDB? (Y/n): " INSTALL_DB
-    INSTALL_DB=${INSTALL_DB:-Y}
+
+    # changed for Docker (assumes sepearte container for postgresql, so do not install in this container)
+    if [ "$IS_DOCKER" = "false" ]; then
+        read -p "PostgreSQL + TimescaleDB? (Y/n): " INSTALL_DB
+        INSTALL_DB=${INSTALL_DB:-Y}
+    else
+        read -p "PostgreSQL + TimescaleDB? (y/N): " INSTALL_DB
+        INSTALL_DB=${INSTALL_DB:-N}
+    fi
 
     read -p "NetMonitor Core? (Y/n): " INSTALL_CORE
     INSTALL_CORE=${INSTALL_CORE:-Y}
@@ -466,13 +473,11 @@ install_netmonitor() {
     source venv/bin/activate
     pip install --upgrade pip >> $LOG_FILE 2>&1
     pip install -r requirements.txt >> $LOG_FILE 2>&1
-	
-	if [ "$IS_DOCKER" = "true" ]; then
+    if [ "$IS_DOCKER" = "true" ]; then
 	    echo DOCKER: List installed Python packages for verification
 	    pip list
     fi
-	
-	print_success "Python dependencies geïnstalleerd"
+    print_success "Python dependencies geïnstalleerd"
 
     # Create directories
     mkdir -p /var/log/netmonitor
