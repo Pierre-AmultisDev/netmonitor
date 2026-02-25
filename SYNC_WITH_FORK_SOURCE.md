@@ -13,12 +13,12 @@ git remote -v
 ```
 git fetch upstream
 ```
-- Stap 4 – Merge upstream in jouw branch
+- Stap 4 – Merge upstream in jouw branch (main is de naam van de branch)
 ```
-git checkout master
-git merge upstream/master
+git checkout main
+git merge upstream/main
 ```
 - Stap 5 – Push naar jouw fork op GitHub
 ```
-git push origin master
+git push origin main
 ```
