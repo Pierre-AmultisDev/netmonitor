@@ -339,7 +339,17 @@ install_system_packages() {
     PACKAGES="git python3 python3-pip python3-venv build-essential libpcap-dev tcpdump curl wget"
 
     if [[ $INSTALL_DB =~ ^[Yy]$ ]]; then
-        PACKAGES="$PACKAGES postgresql postgresql-contrib postgresql-server-dev-all"
+#        PACKAGES="$PACKAGES postgresql postgresql-contrib postgresql-server-dev-all"
+
+    ### remove any conflicting postgres version
+    ##sudo apt remove postgresql -y
+
+    # ensure correct version of postgres; this is not in ubuntu repro
+    sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --yes --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+
+    # set explicit version for postgres in combination with timescale-db
+        PACKAGES="$PACKAGES postgresql-14 postgresql-contrib-14 postgresql-server-dev-14"
     fi
 
     if [[ $INSTALL_NGINX =~ ^[Yy]$ ]]; then
@@ -460,8 +470,30 @@ install_netmonitor() {
 
     print_header "STAP 4/12: NetMonitor Installeren"
 
+    print_info "Installing in $INSTALL_DIR"
+    # check if INSTALL_DIR exists if not create it
+    [ ! -d "$INSTALL_DIR" ] && mkdir -p "$INSTALL_DIR"
+
     # Already in /opt/netmonitor (current directory)
     cd $INSTALL_DIR
+
+    # Backup existing requirements.txt
+    if [ -f requirements.txt ]; then
+        cp requirements.txt requirements.txt.backup.$(date +%Y%m%d_%H%M%S)
+        print_info "Bestaande requirements.txt backed up"
+    fi
+
+    # Copy requirements.txt file if it doesn't exist
+    if [ ! -f requirements.txt ]; then
+        if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+            print_info "copieren van $SCRIPT_DIR/requirements.txt"
+            cp "$SCRIPT_DIR/requirements.txt" requirements.txt
+            print_info "requirements.txt gecopieerd"
+        else
+            print_error "$SCRIPT_DIR/requirements.txt niet gevonden!"
+            return 1
+        fi
+    fi
 
     # Create virtual environment
     print_info "Creating Python virtual environment..."
@@ -508,11 +540,12 @@ configure_netmonitor() {
 
     # Create config.yaml from config.yaml.example if it doesn't exist
     if [ ! -f config.yaml ]; then
-        if [ -f config.yaml.example ]; then
-            cp config.yaml.example config.yaml
+        if [ -f "$SCRIPT_DIR/config.yaml.example" ]; then
+            print_info "copieren van $SCRIPT_DIR/config.yaml.example"
+            cp "$SCRIPT_DIR/config.yaml.example" config.yaml
             print_info "config.yaml aangemaakt van config.yaml.example"
         else
-            print_error "config.yaml.example niet gevonden!"
+            print_error "$SCRIPT_DIR/config.yaml.example niet gevonden!"
             return 1
         fi
     fi
@@ -526,13 +559,13 @@ configure_netmonitor() {
     # Create/Update .env from .env.example
     print_info "Genereren/updaten van .env bestand..."
 
-    if [ ! -f .env.example ]; then
-        print_error ".env.example niet gevonden!"
+    if [ ! -f "$SCRIPT_DIR/.env.example" ]; then
+        print_error "$SCRIPT_DIR/.env.example niet gevonden!"
         return 1
     fi
 
     # Start with .env.example as base
-    cp .env.example .env.new
+    cp "$SCRIPT_DIR/.env.example" .env.new
 
     # Update with configured values (all variables from prompt_config)
     # Installation paths
@@ -647,6 +680,7 @@ import os
 
 # Add install dir to path
 sys.path.insert(0, os.environ.get('INSTALL_DIR', '/opt/netmonitor'))
+sys.path.insert(0, os.environ.get('SCRIPT_DIR'))
 
 try:
     from database import DatabaseManager
@@ -684,11 +718,20 @@ PYTHON_EOF
     # Run the Python script with visible output
     print_info "Database schema wordt aangemaakt..."
 
-    INSTALL_DIR=$INSTALL_DIR python3 /tmp/init_db.py
+    #INSTALL_DIR=$INSTALL_DIR
+    env
+    echo "$SCRIPT_DIR"
+
+    cd $SCRIPT_DIR
+    python3 /tmp/init_db.py
     DB_INIT_STATUS=$?
 
+    #####
+    print_info "$INSTALL_DIR"
+
+
     # Clean up temp script
-    rm -f /tmp/init_db.py
+    ##### rm -f /tmp/init_db.py
 
     if [ $DB_INIT_STATUS -ne 0 ]; then
         print_error "Database schema initialisatie mislukt!"
@@ -1108,6 +1151,9 @@ print_summary() {
 
 # Main execution
 main() {
+    # First check is run as root. If checked later LOGFILE is created with wrong usre/group -> errormessages
+    check_root
+
     # Initialize log file immediately
     echo "=== NetMonitor Installation Log ===" > $LOG_FILE
     echo "Started: $(date)" >> $LOG_FILE
@@ -1121,7 +1167,6 @@ main() {
     echo "Ondersteunde OS: Ubuntu 24.04 & Debian 12"
     echo
 
-    check_root
     check_os
 
     echo
