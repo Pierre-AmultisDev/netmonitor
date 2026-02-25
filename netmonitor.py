@@ -1091,8 +1091,76 @@ class NetworkMonitor:
         # Start periodic metrics save to database (for SOC server sensor)
         def save_sensor_metrics_periodically():
             """Save SOC server metrics to database every 60 seconds"""
+            _mem_log_counter = 0
             while self.running:
                 threading.Event().wait(60)  # Wait 60 seconds
+                _mem_log_counter += 1
+
+                # Elke 5 minuten: log geheugengebruik per tracker (voor diagnose memory leaks)
+                if _mem_log_counter >= 5:
+                    _mem_log_counter = 0
+                    try:
+                        import psutil, os as _os
+                        proc = psutil.Process(_os.getpid())
+                        rss_mb = proc.memory_info().rss / 1024 / 1024
+                        lines = [f"=== Memory stats: {rss_mb:.0f} MB RSS ==="]
+
+                        if hasattr(self, 'detector') and self.detector:
+                            d = self.detector
+                            lines.append(f"  detector trackers (keys):")
+                            for attr in ['connection_tracker', 'port_scan_tracker',
+                                         'dns_tracker', 'icmp_tracker', 'http_tracker',
+                                         'protocol_mismatch_tracker', 'brute_force_tracker',
+                                         'smtp_ftp_tracker', 'dns_query_tracker',
+                                         'api_abuse_tracker', 'tls_metadata_cache',
+                                         'syn_flood_tracker', 'udp_flood_tracker',
+                                         'http_flood_tracker', 'slowloris_tracker',
+                                         'amplification_tracker', 'connection_exhaustion_tracker',
+                                         'bandwidth_saturation_tracker', 'cryptomining_tracker',
+                                         'sqli_tracker', 'xss_tracker',
+                                         'command_injection_tracker', 'path_traversal_tracker',
+                                         'smb_encryption_tracker', 'crypto_extension_tracker',
+                                         'ransom_note_tracker', 'shadow_copy_tracker',
+                                         'iot_botnet_tracker', 'upnp_exploit_tracker',
+                                         'mqtt_abuse_tracker', 'smart_home_tracker',
+                                         'modbus_tracker', 'dnp3_tracker', 'iec104_tracker',
+                                         'docker_escape_tracker', 'k8s_exploit_tracker',
+                                         'fragmentation_tracker', 'tunneling_tracker',
+                                         'polymorphic_tracker', 'lateral_movement_tracker',
+                                         'data_exfil_tracker', 'privilege_escalation_tracker',
+                                         'persistence_tracker', 'credential_dumping_tracker']:
+                                tracker = getattr(d, attr, None)
+                                if tracker is not None and len(tracker) > 0:
+                                    lines.append(f"    {attr}: {len(tracker)}")
+
+                        if hasattr(self, 'behavior_detector') and self.behavior_detector:
+                            bd = self.behavior_detector
+                            for attr in ['connection_tracker', 'outbound_volume',
+                                         'lateral_tracker', 'known_beacons']:
+                                obj = getattr(bd, attr, None)
+                                if obj is not None and len(obj) > 0:
+                                    lines.append(f"  behavior.{attr}: {len(obj)}")
+
+                        if hasattr(self, 'pcap_exporter') and self.pcap_exporter:
+                            pe = self.pcap_exporter
+                            if hasattr(pe, 'flow_buffers'):
+                                lines.append(f"  pcap_exporter.flow_buffers: {len(pe.flow_buffers)}")
+                            if hasattr(pe, 'packet_buffer'):
+                                lines.append(f"  pcap_exporter.packet_buffer: {len(pe.packet_buffer)}")
+
+                        if hasattr(self, 'device_discovery') and self.device_discovery:
+                            dd = self.device_discovery
+                            if hasattr(dd, 'traffic_stats'):
+                                lines.append(f"  device_discovery.traffic_stats: {len(dd.traffic_stats)}")
+                            if hasattr(dd, 'device_cache'):
+                                lines.append(f"  device_discovery.device_cache: {len(dd.device_cache)}")
+                            if hasattr(dd, 'dns_cache'):
+                                lines.append(f"  device_discovery.dns_cache: {len(dd.dns_cache)}")
+
+                        self.logger.info("\n".join(lines))
+                    except Exception as e:
+                        self.logger.warning(f"Memory stats logging fout: {e}")
+
                 if self.running and self.metrics and self.db and self.sensor_id:
                     try:
                         # Get current metrics
@@ -1117,6 +1185,18 @@ class NetworkMonitor:
                         self.logger.debug(f"Saved SOC server metrics: {traffic_stats.get('total_packets', 0)} packets, {bandwidth_mbps:.2f} Mbps")
                     except Exception as e:
                         self.logger.error(f"Error saving SOC server metrics: {e}")
+
+                # Cleanup oude detector tracking data (voorkomt memory leak)
+                if hasattr(self, 'detector') and hasattr(self.detector, 'cleanup_old_data'):
+                    try:
+                        self.detector.cleanup_old_data()
+                    except Exception as e:
+                        self.logger.warning(f"Error cleaning up detector data: {e}")
+                if hasattr(self, 'behavior_detector') and hasattr(self.behavior_detector, 'cleanup_old_data'):
+                    try:
+                        self.behavior_detector.cleanup_old_data()
+                    except Exception as e:
+                        self.logger.warning(f"Error cleaning up behavior_detector data: {e}")
 
         metrics_save_thread = threading.Thread(target=save_sensor_metrics_periodically, daemon=True, name="MetricsSave")
         metrics_save_thread.start()

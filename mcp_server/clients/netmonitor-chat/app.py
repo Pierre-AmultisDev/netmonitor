@@ -184,8 +184,16 @@ QUICK_INTENTS: List[Tuple[str, str, Dict[str, Any], str]] = [
     # determined by the LLM based on context. Quick intents can't provide this.
     # The LLM will call web_search with appropriate query when needed.
 
-    # DNS lookup
-    (r"(wat.*is|geef|vind).*(ip|ip-adres|ip.*address).*(van|voor|of)",
+    # Device communication partners - welke IPs communiceert een apparaat mee
+    (r"(welke|vind|geef|toon|show).*(ip|ip.adres|adressen).*(communic|praat|contact|verbind|talk).*(met|with|van|naar)",
+     "get_device_learned_behavior", {}, "communicatie partners ophalen"),
+    (r"(communic|praat|contact|verbind|talk).*(welke|met.*welke|which).*(ip|adressen|apparaat)",
+     "get_device_learned_behavior", {}, "communicatie partners ophalen"),
+    (r"(ip.adressen|ip.adres|adressen).*(waarmee|met wie|with which).*(communic|praat|verbind)",
+     "get_device_learned_behavior", {}, "communicatie partners ophalen"),
+
+    # DNS lookup - alleen voor domeinnaam->IP vertaling, NIET voor IP-gerelateerde vragen
+    (r"(wat.*is|geef|vind).*(ip|ip-adres|ip.*address).*(van|voor|of).*(domein|domain|hostname|website|\.com|\.nl|\.org|\.net)",
      "dns_lookup", {}, "DNS lookup uitvoeren"),
     (r"(dns|resolve|lookup).*(domain|domein|hostname)",
      "dns_lookup", {}, "DNS lookup uitvoeren"),
@@ -229,6 +237,14 @@ def quick_intent_match(message: str) -> Optional[Tuple[str, Dict[str, Any], str]
                 ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', message)
                 if ip_match:
                     args['ip'] = ip_match.group(1)
+
+            # Try to extract IP address for device-specific tools
+            if tool_name in ("get_device_learned_behavior", "get_device_traffic_stats",
+                             "get_device_by_ip", "get_asset_risk", "get_device_learning_status",
+                             "get_device_classification_hints") and 'ip_address' not in args:
+                ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', message)
+                if ip_match:
+                    args['ip_address'] = ip_match.group(1)
 
             print(f"[QuickMatch] Matched '{message}' -> {tool_name}({args})")
             return (tool_name, args, description)
@@ -747,6 +763,58 @@ def filter_relevant_tools(user_message: str, all_tools: List[Dict[str, Any]], ma
 
 
 # ------------------------------------------------------------
+# Think Tag Filter (strips <think>...</think> reasoning blocks)
+# ------------------------------------------------------------
+
+class ThinkTagFilter:
+    """Strips <think>...</think> blocks from streamed LLM output token by token."""
+
+    def __init__(self):
+        self.in_think = False
+        self.pending = ""  # Buffer for partial tag detection
+
+    def feed(self, text: str) -> str:
+        """Returns text to send to client (think blocks removed)."""
+        result = ""
+        self.pending += text
+
+        while self.pending:
+            if self.in_think:
+                end_idx = self.pending.find("</think>")
+                if end_idx != -1:
+                    self.in_think = False
+                    self.pending = self.pending[end_idx + len("</think>"):]
+                    # Skip leading newline after closing tag
+                    if self.pending.startswith("\n"):
+                        self.pending = self.pending[1:]
+                else:
+                    if len(self.pending) > 8:
+                        self.pending = self.pending[-8:]
+                    break
+            else:
+                start_idx = self.pending.find("<think>")
+                if start_idx != -1:
+                    result += self.pending[:start_idx]
+                    self.in_think = True
+                    self.pending = self.pending[start_idx + len("<think>"):]
+                else:
+                    if len(self.pending) > 7:
+                        result += self.pending[:-7]
+                        self.pending = self.pending[-7:]
+                    break
+
+        return result
+
+    def flush(self) -> str:
+        """Return any remaining buffered content at end of stream."""
+        if not self.in_think:
+            result = self.pending
+            self.pending = ""
+            return result
+        return ""
+
+
+# ------------------------------------------------------------
 # LLM Clients
 # ------------------------------------------------------------
 
@@ -822,13 +890,15 @@ class LMStudioClient:
         messages: List[Dict[str, Any]],
         stream: bool = True,
         temperature: float = 0.7,
-        tools: Optional[List[Dict[str, Any]]] = None
+        tools: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: int = 2000
     ) -> AsyncGenerator[Dict[str, Any], None]:
         payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": stream,
-            "temperature": temperature
+            "temperature": temperature,
+            "max_tokens": max_tokens
         }
         if tools:
             payload["tools"] = tools
@@ -1133,6 +1203,7 @@ async def websocket_chat(websocket: WebSocket):
             message = data.get("message", "")
             history = data.get("history", [])
             temperature = data.get("temperature", 0.3)
+            max_tokens = int(data.get("max_tokens", 2000))
             system_prompt = data.get("system_prompt", "")
 
             llm_provider = data.get("llm_provider", "ollama")
@@ -1201,7 +1272,15 @@ async def websocket_chat(websocket: WebSocket):
                 # Format response with LLM (no tools = fast)
                 await send_status("Antwoord formuleren...", "formatting")
 
-                format_prompt = f"""De gebruiker vroeg: "{message}"
+                # Als tool mislukte, geef andere instructie
+                if final_result and not final_result.get("success"):
+                    format_prompt = f"""De gebruiker vroeg: "{message}"
+
+De tool {tool_name} kon geen data ophalen (fout: {final_result.get('error', 'onbekend')}).
+Leg kort uit dat je die specifieke data niet kon ophalen en welk type tool daarvoor nodig zou zijn.
+Geef een direct antwoord in het Nederlands. Geen JSON, geen code blocks."""
+                else:
+                    format_prompt = f"""De gebruiker vroeg: "{message}"
 
 De tool {tool_name} gaf dit resultaat:
 {json.dumps(final_result, indent=2, default=str)[:4000]}
@@ -1211,25 +1290,42 @@ Geef een duidelijk en beknopt Nederlands antwoord gebaseerd op deze data.
 Regels:
 - Gebruik opsommingstekens voor lijsten
 - Geen JSON in je antwoord
+- Geen markdown code blocks (geen ```)
 - Voeg GEEN opmerkingen toe over ontbrekende of afgebroken data
 - Geef alleen een samenvatting van wat er WEL in de data staat
 - Als er security context/aanbevelingen zijn, neem deze mee in je antwoord
-- Eindig niet met waarschuwingen of disclaimers"""
+- Eindig niet met waarschuwingen of disclaimers
+- Geef je antwoord DIRECT, zonder inleiding of herhaling"""
 
                 format_messages = [
                     {"role": "system", "content": system_prompt or "Je bent een security expert die duidelijke Nederlandse antwoorden geeft."},
                     {"role": "user", "content": format_prompt}
                 ]
 
-                async for chunk in llm_client.chat(model, format_messages, stream=True, temperature=temperature, tools=None):
+                think_filter = ThinkTagFilter()
+                format_response = ""
+                format_repetition = False
+                async for chunk in llm_client.chat(model, format_messages, stream=True, temperature=temperature, tools=None, max_tokens=max_tokens):
                     if "error" in chunk:
                         await websocket.send_json({"type": "error", "content": chunk["error"]})
                         break
                     if "message" in chunk:
                         content = chunk["message"].get("content", "")
                         if content:
-                            await websocket.send_json({"type": "token", "content": content})
+                            format_response += content
+                            if len(format_response) > 600 and not format_repetition:
+                                tail = format_response[-200:]
+                                if format_response[:-200].find(tail) != -1:
+                                    format_repetition = True
+                                    print(f"[WebSocket] Format repetition detected, stopping")
+                                    break
+                            filtered = think_filter.feed(content)
+                            if filtered:
+                                await websocket.send_json({"type": "token", "content": filtered})
                     if chunk.get("done"):
+                        remainder = think_filter.flush()
+                        if remainder:
+                            await websocket.send_json({"type": "token", "content": remainder})
                         break
 
                 await websocket.send_json({"type": "done"})
@@ -1251,15 +1347,30 @@ Regels:
                     conv_messages.append({"role": "system", "content": system_prompt})
                 conv_messages.extend(history + [{"role": "user", "content": message}])
 
-                async for chunk in llm_client.chat(model, conv_messages, stream=True, temperature=temperature, tools=None):
+                think_filter = ThinkTagFilter()
+                conv_response = ""
+                conv_repetition = False
+                async for chunk in llm_client.chat(model, conv_messages, stream=True, temperature=temperature, tools=None, max_tokens=max_tokens):
                     if "error" in chunk:
                         await websocket.send_json({"type": "error", "content": chunk["error"]})
                         break
                     if "message" in chunk:
                         content = chunk["message"].get("content", "")
                         if content:
-                            await websocket.send_json({"type": "token", "content": content})
+                            conv_response += content
+                            if len(conv_response) > 600 and not conv_repetition:
+                                tail = conv_response[-200:]
+                                if conv_response[:-200].find(tail) != -1:
+                                    conv_repetition = True
+                                    print(f"[WebSocket] Conv repetition detected, stopping")
+                                    break
+                            filtered = think_filter.feed(content)
+                            if filtered:
+                                await websocket.send_json({"type": "token", "content": filtered})
                     if chunk.get("done"):
+                        remainder = think_filter.flush()
+                        if remainder:
+                            await websocket.send_json({"type": "token", "content": remainder})
                         break
 
                 await websocket.send_json({"type": "done"})
@@ -1365,6 +1476,8 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                 buffered_content = ""
                 first_token_sent = False
                 llm_error = False
+                repetition_detected = False
+                think_filter = ThinkTagFilter()
 
                 if tool_iteration > 1:
                     await send_status(f"Volgende stap bepalen... ({tool_iteration}/{MAX_TOOL_ITERATIONS})", "llm_thinking")
@@ -1372,7 +1485,7 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                 # If forced to generate final report, disable tools
                 current_tools = None if force_final_report else use_tools
 
-                async for chunk in llm_client.chat(model, messages, stream=True, temperature=temperature, tools=current_tools):
+                async for chunk in llm_client.chat(model, messages, stream=True, temperature=temperature, tools=current_tools, max_tokens=max_tokens):
                     if "error" in chunk:
                         await websocket.send_json({"type": "error", "content": chunk["error"]})
                         llm_error = True
@@ -1385,16 +1498,25 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                         if content:
                             full_response += content
 
+                            # Repetitie detectie: stop als de laatste 200 chars eerder in response voorkomen
+                            if len(full_response) > 600 and not repetition_detected:
+                                tail = full_response[-200:]
+                                if full_response[:-200].find(tail) != -1:
+                                    repetition_detected = True
+                                    print(f"[WebSocket] Repetition detected, stopping LLM generation")
+                                    break
+
                             if not first_token_sent and not has_tool_call:
                                 await send_status("Antwoord genereren...", "generating")
                                 first_token_sent = True
 
                             if not has_tool_call:
+                                filtered = think_filter.feed(content)
                                 if buffer_tokens:
-                                    buffered_content += content
-                                elif force_final_report or not full_response.strip().startswith("{"):
+                                    buffered_content += filtered
+                                elif filtered and (force_final_report or not full_response.strip().startswith("{")):
                                     # Always stream tokens when forcing final report, even if response looks like JSON
-                                    await websocket.send_json({"type": "token", "content": content})
+                                    await websocket.send_json({"type": "token", "content": filtered})
 
                         # Accumulate tool calls
                         tool_calls = msg.get("tool_calls")
@@ -1428,6 +1550,13 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                                         accumulated_tool_calls[idx]["function"]["arguments"] += func_chunk["arguments"]
 
                     if chunk.get("done"):
+                        # Flush any remaining buffered think filter content
+                        remainder = think_filter.flush()
+                        if remainder and not has_tool_call:
+                            if buffer_tokens:
+                                buffered_content += remainder
+                            elif force_final_report or not full_response.strip().startswith("{"):
+                                await websocket.send_json({"type": "token", "content": remainder})
                         break
 
                 # Handle errors
@@ -1511,7 +1640,7 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                         }
                         messages.append({"role": "assistant", "content": "", "tool_calls": [complete_tool_call]})
 
-                        tool_content = json.dumps(final_result) if final_result else "{}"
+                        tool_content = (json.dumps(final_result) if final_result else "{}")[:3000]
                         if enrichment_context:
                             tool_content += f"\n\n{enrichment_context}"
                         tool_message: Dict[str, Any] = {"role": "tool", "content": tool_content}
@@ -1569,7 +1698,7 @@ BELANGRIJK: Gebruik de juiste tool wanneer nieuwe data nodig is. Verwijs de gebr
                         if any(kw in tool_name.lower() for kw in threat_related) and result:
                             enrichment_context = await enrich_with_threat_intel(mcp_client, result, send_status)
 
-                        result_with_context = json.dumps(result)
+                        result_with_context = json.dumps(result)[:3000]
                         if enrichment_context:
                             result_with_context += f"\n\n{enrichment_context}"
 

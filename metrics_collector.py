@@ -9,7 +9,7 @@ import time
 import logging
 import psutil
 import socket
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 from typing import Dict, List
 import ipaddress
@@ -45,6 +45,8 @@ class MetricsCollector:
         self.ip_stats = defaultdict(lambda: {
             'packets': 0,
             'bytes': 0,
+            'outbound_bytes': 0,
+            'inbound_bytes': 0,
             'direction': 'unknown'
         })
 
@@ -52,8 +54,8 @@ class MetricsCollector:
         self.alert_count = 0
         self.last_alert_reset = time.time()
 
-        # Packet rate tracking
-        self.packet_timestamps = []
+        # Packet rate tracking (deque met max 60s aan timestamps bij ~100 pps)
+        self.packet_timestamps = deque(maxlen=6000)
         self.last_metrics_save = time.time()
         self.metrics_save_interval = 10  # 10 seconds - was 60, now much faster for dashboard
         self.first_packet_seen = False  # Track if we've seen any packets yet
@@ -128,34 +130,38 @@ class MetricsCollector:
                 self.outbound_bytes += packet_size
                 self.ip_stats[src_ip]['packets'] += 1
                 self.ip_stats[src_ip]['bytes'] += packet_size
-                self.ip_stats[src_ip]['direction'] = 'outbound'
+                self.ip_stats[src_ip]['outbound_bytes'] += packet_size
 
             elif not src_internal and dst_internal:
-                # Inbound
+                # Inbound (ACKs, responses) - getrackt op het interne doel-IP
                 self.inbound_packets += 1
                 self.inbound_bytes += packet_size
                 self.ip_stats[dst_ip]['packets'] += 1
                 self.ip_stats[dst_ip]['bytes'] += packet_size
-                self.ip_stats[dst_ip]['direction'] = 'inbound'
+                self.ip_stats[dst_ip]['inbound_bytes'] += packet_size
 
             elif src_internal and dst_internal:
                 # Internal-to-internal traffic
                 # Track both source and destination for top talkers
+                # src stuurt (outbound), dst ontvangt (inbound)
                 self.ip_stats[src_ip]['packets'] += 1
                 self.ip_stats[src_ip]['bytes'] += packet_size
+                self.ip_stats[src_ip]['outbound_bytes'] += packet_size
                 self.ip_stats[src_ip]['direction'] = 'internal'
 
                 self.ip_stats[dst_ip]['packets'] += 1
                 self.ip_stats[dst_ip]['bytes'] += packet_size
+                self.ip_stats[dst_ip]['inbound_bytes'] += packet_size
                 self.ip_stats[dst_ip]['direction'] = 'internal'
 
             # Track packet rate
             current_time = time.time()
             self.packet_timestamps.append(current_time)
 
-            # Keep only last 60 seconds of timestamps
+            # Verwijder timestamps ouder dan 60 seconden (deque is al begrensd op maxlen)
             cutoff = current_time - 60
-            self.packet_timestamps = [ts for ts in self.packet_timestamps if ts > cutoff]
+            while self.packet_timestamps and self.packet_timestamps[0] < cutoff:
+                self.packet_timestamps.popleft()
 
             # Force save on first packet for immediate dashboard feedback
             if not self.first_packet_seen:
@@ -237,13 +243,27 @@ class MetricsCollector:
             except:
                 hostname = ip
 
+            # Bepaal dominante richting op basis van byte-verhouding
+            out_b = stats['outbound_bytes']
+            in_b = stats['inbound_bytes']
+            if out_b == 0 and in_b == 0:
+                direction = stats['direction']  # internal traffic
+            elif out_b > in_b * 3:
+                direction = 'outbound'
+            elif in_b > out_b * 3:
+                direction = 'inbound'
+            else:
+                direction = 'bidirectional'
+
             result.append({
                 'ip': ip,
                 'hostname': hostname,
                 'packets': stats['packets'],
                 'bytes': stats['bytes'],
                 'mb': round(stats['bytes'] / (1024 * 1024), 2),
-                'direction': stats['direction']
+                'outbound_mb': round(stats['outbound_bytes'] / (1024 * 1024), 2),
+                'inbound_mb': round(stats['inbound_bytes'] / (1024 * 1024), 2),
+                'direction': direction
             })
 
         return result

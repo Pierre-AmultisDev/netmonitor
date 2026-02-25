@@ -152,7 +152,84 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Auto-refresh data every 30 seconds
     setInterval(loadDashboardData, 30000);
+
+    // Session inactivity countdown
+    initSessionTimeoutWarning();
 });
+
+// ==================== Session Timeout Warning ====================
+
+function initSessionTimeoutWarning() {
+    // Maak waarschuwingsbanner aan (vast aan bovenkant pagina)
+    const banner = document.createElement('div');
+    banner.id = 'session-timeout-banner';
+    banner.style.cssText = 'display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#dc3545; color:white; padding:12px 20px; text-align:center; font-size:14px; box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+    banner.innerHTML = `
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>
+        <span>Sessie verloopt over <strong id="timeout-countdown">--</strong> wegens inactiviteit.</span>
+        <button class="btn btn-sm btn-light ms-3" id="session-extend-btn">Sessie verlengen</button>
+    `;
+    document.body.prepend(banner);
+
+    let countdownInterval = null;
+
+    document.getElementById('session-extend-btn').addEventListener('click', () => {
+        fetch('/api/auth/extend-session', { method: 'POST' })
+            .then(() => {
+                banner.style.display = 'none';
+                if (countdownInterval) {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                }
+            })
+            .catch(e => console.error('[SESSION] Error extending session:', e));
+    });
+
+    setInterval(async () => {
+        try {
+            const resp = await fetch('/api/auth/session-status');
+            const data = await resp.json();
+
+            if (!data.authenticated) {
+                window.location.href = '/login';
+                return;
+            }
+
+            if (data.remaining <= 120) {
+                // Toon waarschuwing en start countdown
+                banner.style.display = 'block';
+                if (!countdownInterval) {
+                    let remaining = data.remaining;
+                    document.getElementById('timeout-countdown').textContent = formatCountdown(remaining);
+                    countdownInterval = setInterval(() => {
+                        remaining--;
+                        document.getElementById('timeout-countdown').textContent = formatCountdown(remaining);
+                        if (remaining <= 0) {
+                            clearInterval(countdownInterval);
+                            window.location.href = '/login';
+                        }
+                    }, 1000);
+                }
+            } else {
+                banner.style.display = 'none';
+                if (countdownInterval) {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                }
+            }
+        } catch (e) {
+            console.error('[SESSION] Error checking session status:', e);
+        }
+    }, 10000);
+}
+
+function formatCountdown(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m > 0 ? `${m}:${s.toString().padStart(2, '0')}` : `${s}s`;
+}
+
+// ==================== Loading ====================
 
 function updateLoadingMessage(message, hint = null) {
     const msgEl = document.getElementById('loading-message');
@@ -1386,13 +1463,8 @@ function updateTopTalkers(talkers) {
     talkers.forEach(talker => {
         const row = document.createElement('tr');
 
-        const bytes = talker.bytes || 0;
-        const mb = (bytes / (1024 * 1024)).toFixed(2);
-
-        const direction = talker.direction || 'unknown';
-        const directionBadge = direction === 'outbound' ?
-            '<span class="badge badge-direction outbound">OUT</span>' :
-            '<span class="badge badge-direction inbound">IN</span>';
+        const inMb = parseFloat(talker.inbound_mb || 0).toFixed(2);
+        const outMb = parseFloat(talker.outbound_mb || 0).toFixed(2);
 
         // Support both 'ip' and 'ip_address' for backwards compatibility
         const ipAddress = talker.ip || talker.ip_address || 'unknown';
@@ -1403,8 +1475,8 @@ function updateTopTalkers(talkers) {
                 ${talker.hostname && talker.hostname !== ipAddress ?
                   `<br><small class="text-muted">${talker.hostname}</small>` : ''}
             </td>
-            <td>${mb} MB</td>
-            <td>${directionBadge}</td>
+            <td class="text-end text-info"><small>${inMb} MB</small></td>
+            <td class="text-end text-warning"><small>${outMb} MB</small></td>
         `;
 
         tbody.appendChild(row);
@@ -1601,6 +1673,12 @@ function updateSensorsTable(sensors) {
                             title="Edit sensor settings">
                         <i class="bi bi-sliders"></i>
                     </button>
+                    <button class="btn btn-outline-secondary flush-buffer-btn"
+                            data-sensor-id="${sensor.sensor_id}"
+                            data-sensor-name="${sensor.hostname}"
+                            title="Flush alert buffer">
+                        <i class="bi bi-arrow-repeat"></i>
+                    </button>
                     <button class="btn btn-outline-danger delete-sensor-btn"
                             data-sensor-id="${sensor.sensor_id}"
                             data-sensor-name="${sensor.hostname}"
@@ -1641,6 +1719,15 @@ function updateSensorsTable(sensors) {
             const sensorName = this.getAttribute('data-sensor-name');
             const sensorLocation = this.getAttribute('data-sensor-location');
             editSensorSettings(sensorId, sensorName, sensorLocation);
+        });
+    });
+
+    document.querySelectorAll('.flush-buffer-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const sensorId = this.getAttribute('data-sensor-id');
+            const sensorName = this.getAttribute('data-sensor-name');
+            flushSensorBuffer(sensorId, sensorName);
         });
     });
 
@@ -2225,138 +2312,49 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(loadSensors, 30000);
 });
 
-// ==================== Sensor Command Center ====================
-
-function populateCommandSensorSelects() {
+function populateWhitelistSensorSelect() {
     fetch('/api/sensors/')
         .then(response => response.json())
         .then(data => {
             if (data.success && data.data) {
-                const commandSelect = document.getElementById('command-sensor-select');
                 const whitelistSelect = document.getElementById('whitelist-sensor-select');
 
-                // Clear existing options except first
-                commandSelect.innerHTML = '<option value="">-- Select Sensor --</option>';
                 whitelistSelect.innerHTML = '<option value="">-- Select Sensor --</option>';
 
                 data.data.forEach(sensor => {
-                    const option1 = document.createElement('option');
-                    option1.value = sensor.sensor_id;
-                    option1.textContent = `${sensor.hostname} (${sensor.sensor_id})`;
-                    commandSelect.appendChild(option1);
-
-                    const option2 = document.createElement('option');
-                    option2.value = sensor.sensor_id;
-                    option2.textContent = `${sensor.hostname} (${sensor.sensor_id})`;
-                    whitelistSelect.appendChild(option2);
+                    const option = document.createElement('option');
+                    option.value = sensor.sensor_id;
+                    option.textContent = `${sensor.hostname} (${sensor.sensor_id})`;
+                    whitelistSelect.appendChild(option);
                 });
             }
         })
-        .catch(error => console.error('Error loading sensors for selects:', error));
+        .catch(error => console.error('Error loading sensors for whitelist select:', error));
 }
 
-// Show/hide params based on command type
-document.getElementById('command-type-select').addEventListener('change', function() {
-    const paramsContainer = document.getElementById('command-params-container');
-    const commandType = this.value;
-
-    if (commandType === 'change_interval') {
-        paramsContainer.style.display = 'block';
-        document.getElementById('command-params').placeholder = '{"interval": 60}';
-    } else {
-        paramsContainer.style.display = 'none';
-    }
-});
-
-// Send command button
-document.getElementById('send-command-btn').addEventListener('click', function() {
-    const sensorId = document.getElementById('command-sensor-select').value;
-    const commandType = document.getElementById('command-type-select').value;
-    const paramsInput = document.getElementById('command-params').value;
-    const resultDiv = document.getElementById('command-result');
-    const alertDiv = resultDiv.querySelector('.alert');
-
-    if (!sensorId || !commandType) {
-        alertDiv.className = 'alert alert-warning';
-        alertDiv.textContent = 'Please select sensor and command';
-        resultDiv.style.display = 'block';
+function flushSensorBuffer(sensorId, sensorName) {
+    if (!confirm(`Flush alert buffer for sensor "${sensorName}" (${sensorId})?\n\nThis will send all buffered alerts immediately.`)) {
         return;
     }
-
-    let parameters = {};
-    if (commandType === 'change_interval' && paramsInput) {
-        try {
-            parameters = JSON.parse(paramsInput);
-        } catch (e) {
-            alertDiv.className = 'alert alert-danger';
-            alertDiv.textContent = 'Invalid JSON parameters';
-            resultDiv.style.display = 'block';
-            return;
-        }
-    }
-
-    // Show loading
-    alertDiv.className = 'alert alert-info';
-    alertDiv.textContent = 'Sending command...';
-    resultDiv.style.display = 'block';
 
     fetch(`/api/sensors/${sensorId}/commands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            command_type: commandType,
-            parameters: parameters
+            command_type: 'flush_buffer',
+            parameters: {}
         })
     })
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            alertDiv.className = 'alert alert-success';
-            alertDiv.innerHTML = `<strong>Success!</strong> ${data.message}<br><small>Command ID: ${data.command_id}</small>`;
+            alert(`Buffer flush command sent to "${sensorName}".`);
         } else {
-            alertDiv.className = 'alert alert-danger';
-            alertDiv.textContent = 'Error: ' + data.error;
+            alert('Error: ' + data.error);
         }
     })
-    .catch(error => {
-        alertDiv.className = 'alert alert-danger';
-        alertDiv.textContent = 'Error: ' + error.message;
-    });
-});
-
-// Command history button
-document.getElementById('command-history-btn').addEventListener('click', function() {
-    const sensorId = document.getElementById('command-sensor-select').value;
-
-    if (!sensorId) {
-        alert('Please select a sensor first');
-        return;
-    }
-
-    fetch(`/api/sensors/${sensorId}/commands/history`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                let html = '<h6>Command History for ' + sensorId + '</h6><ul class="list-group">';
-                data.commands.forEach(cmd => {
-                    const statusClass = cmd.status === 'completed' ? 'success' : cmd.status === 'failed' ? 'danger' : 'warning';
-                    html += `<li class="list-group-item bg-dark text-light border-secondary">
-                        <strong>${cmd.command_type}</strong>
-                        <span class="badge bg-${statusClass}">${cmd.status}</span><br>
-                        <small>${new Date(cmd.created_at).toLocaleString()}</small>
-                    </li>`;
-                });
-                html += '</ul>';
-
-                const resultDiv = document.getElementById('command-result');
-                const alertDiv = resultDiv.querySelector('.alert');
-                alertDiv.className = 'alert alert-info';
-                alertDiv.innerHTML = html;
-                resultDiv.style.display = 'block';
-            }
-        })
-        .catch(error => console.error('Error loading command history:', error));
-});
+    .catch(error => alert('Error: ' + error.message));
+}
 
 // ==================== Whitelist Management ====================
 
@@ -2579,7 +2577,7 @@ window.deleteWhitelistEntry = function(entryId) {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     setTimeout(() => {
-        populateCommandSensorSelects();
+        populateWhitelistSensorSelect();
         loadWhitelist();
     }, 2000);
 

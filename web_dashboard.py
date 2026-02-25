@@ -8,6 +8,7 @@ Real-time security monitoring dashboard
 
 import os
 import sys
+import time
 import logging
 import threading
 import hashlib
@@ -48,7 +49,7 @@ app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'dev-key-CHANGE-ME
 app.config['SESSION_COOKIE_NAME'] = 'netmonitor_session'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 60 minutes (increased from 30)
+app.config['PERMANENT_SESSION_LIFETIME'] = 900  # 15 minuten inactiviteit timeout
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True  # Refresh session on each request
 # app.config['SESSION_COOKIE_SECURE'] = True  # Enable in production with HTTPS
 
@@ -63,6 +64,47 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_page'
 login_manager.session_protection = 'basic'  # Changed from 'strong' to prevent premature session invalidation
+
+INACTIVITY_TIMEOUT = 900  # 15 minuten
+
+# Auto-refresh endpoints tellen niet als gebruikersactiviteit
+_AUTO_REFRESH_PATHS = frozenset([
+    '/api/dashboard', '/api/sensors', '/api/sensors/',
+    '/api/whitelist', '/api/integrations/status', '/api/disk-usage',
+    '/api/auth/session-status',
+])
+
+@app.before_request
+def check_session_timeout():
+    """Log gebruiker uit na 15 minuten inactiviteit"""
+    if current_user.is_authenticated:
+        last_active = session.get('last_active')
+        now = time.time()
+        if last_active and (now - last_active) > INACTIVITY_TIMEOUT:
+            logout_user()
+            session.clear()
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': 'Session expired due to inactivity'}), 401
+            return redirect(url_for('login_page'))
+        # Alleen echte gebruikersacties resetten de timer
+        if request.path not in _AUTO_REFRESH_PATHS:
+            session['last_active'] = now
+
+@app.route('/api/auth/session-status')
+def api_session_status():
+    """Geeft resterende sessietijd terug voor countdown timer"""
+    if not current_user.is_authenticated:
+        return jsonify({'authenticated': False, 'remaining': 0})
+    last_active = session.get('last_active', time.time())
+    remaining = max(0, int(INACTIVITY_TIMEOUT - (time.time() - last_active)))
+    return jsonify({'authenticated': True, 'remaining': remaining})
+
+@app.route('/api/auth/extend-session', methods=['POST'])
+@login_required
+def api_extend_session():
+    """Reset de inactiviteit timer (door gebruiker aangeroepen vanuit countdown banner)"""
+    session['last_active'] = time.time()
+    return jsonify({'success': True, 'remaining': INACTIVITY_TIMEOUT})
 
 # Initialize SocketIO with eventlet for production
 socketio = SocketIO(
@@ -84,7 +126,8 @@ web_auth = None  # Web user authentication manager
 pcap_stats_cache = None
 pcap_stats_cache_time = None
 pcap_stats_cache_lock = threading.Lock()
-PCAP_STATS_CACHE_TTL = 300  # 5 minutes cache
+PCAP_STATS_CACHE_TTL = 1800  # 30 minutes cache (987k+ files make scanning slow)
+pcap_stats_refresh_thread = None  # Background refresh thread
 
 
 def init_dashboard(config_file='config.yaml'):
@@ -358,7 +401,8 @@ def api_login():
             return jsonify({'success': True, 'require_2fa': True})
         else:
             # No 2FA - log in directly
-            login_user(user, remember=True)  # Remember user to keep session alive
+            login_user(user, remember=False)
+            session.permanent = True
             logger.info(f"User logged in: {username}")
             return jsonify({'success': True, 'user': user.to_dict()})
 
@@ -397,7 +441,8 @@ def api_verify_2fa():
             user_agent=request.headers.get('User-Agent'),
             is_backup_code=use_backup
         ):
-            login_user(user, remember=True)  # Remember user to keep session alive
+            login_user(user, remember=False)
+            session.permanent = True
             session.pop('pending_2fa_user_id', None)
             logger.info(f"User logged in with 2FA: {user.username}")
             return jsonify({'success': True, 'user': user.to_dict()})
@@ -1354,8 +1399,10 @@ def api_submit_sensor_alerts(sensor_id):
         except Exception as e:
             logger.warning(f"Could not initialize BehaviorMatcher for sensor alerts: {e}")
 
-        # Ensure PCAP directory exists for sensor captures
-        pcap_dir = Path('/var/log/netmonitor/pcap/sensors')
+        # Ensure PCAP directory exists voor sensor captures (jaar/maand/dag/uur per sensor)
+        _now = datetime.now()
+        pcap_dir = (Path('/var/log/netmonitor/pcap/sensors') / sensor_id
+                    / f"{_now.year}" / f"{_now.month:02d}" / f"{_now.day:02d}" / f"{_now.hour:02d}")
         pcap_dir.mkdir(parents=True, exist_ok=True)
 
         # Process alerts
@@ -2026,8 +2073,8 @@ def api_kiosk_metrics():
             db_size_mb = db_size_bytes / (1024 * 1024)
             db_size_gb = db_size_bytes / (1024 * 1024 * 1024)
 
-            # Get alert count
-            cursor.execute("SELECT COUNT(*) FROM alerts")
+            # Get alert count (reltuples is ~10x sneller dan COUNT(*))
+            cursor.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'alerts'")
             db_alerts_count = cursor.fetchone()[0]
 
             # Get oldest alert date
@@ -2285,7 +2332,8 @@ def api_disk_usage():
         cursor.execute("SELECT pg_database_size(current_database())")
         db_size_bytes = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM alerts")
+        # Gebruik reltuples (pg statistieken) i.p.v. COUNT(*) - ~10x sneller
+        cursor.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'alerts'")
         db_alerts_count = cursor.fetchone()[0]
 
         cursor.execute("SELECT MIN(timestamp) FROM alerts")
@@ -2296,78 +2344,57 @@ def api_disk_usage():
 
         db._return_connection(conn)
 
-        # Get PCAP storage info - OPTIMIZED with 5-minute caching
-        # With 960k+ PCAP files, scanning takes 10+ seconds
-        # Cache dramatically improves dashboard load time
-        # CRITICAL: Use lock to prevent multiple workers from scanning simultaneously
-        global pcap_stats_cache, pcap_stats_cache_time, pcap_stats_cache_lock
+        # Get PCAP storage info - met 30-minuten cache en non-blocking background refresh
+        # 987k+ bestanden maken scanning 5+ seconden — altijd stale cache teruggeven,
+        # refresh wordt op achtergrond gestart zodat de response niet blokkeert.
+        global pcap_stats_cache, pcap_stats_cache_time, pcap_stats_cache_lock, pcap_stats_refresh_thread
 
         pcap_size_bytes = 0
         pcap_file_count = 0
 
-        # Lock the entire cache check + populate operation to prevent race conditions
-        # This ensures only ONE worker scans while others wait for the cache
+        def _refresh_pcap_stats():
+            """Background thread: scan PCAP dir en update cache."""
+            import os
+            pcap_dir = '/var/log/netmonitor/pcap'
+            if not os.path.exists(pcap_dir):
+                return
+            try:
+                result = subprocess.run(
+                    ['du', '-sb', pcap_dir],
+                    capture_output=True, text=True, timeout=60
+                )
+                size_bytes = int(result.stdout.split()[0]) if result.returncode == 0 else 0
+
+                result = subprocess.run(
+                    "find /var/log/netmonitor/pcap -name '*.pcap' -type f | wc -l",
+                    capture_output=True, text=True, shell=True, timeout=60
+                )
+                file_count = int(result.stdout.strip()) if result.returncode == 0 else 0
+
+                with pcap_stats_cache_lock:
+                    global pcap_stats_cache, pcap_stats_cache_time
+                    pcap_stats_cache = {'size_bytes': size_bytes, 'file_count': file_count}
+                    pcap_stats_cache_time = datetime.now()
+                logger.info(f"PCAP stats vernieuwd: {file_count:,} bestanden, {size_bytes/(1024**3):.2f} GB")
+            except Exception as e:
+                logger.warning(f"PCAP stats scan mislukt: {e}")
+
         with pcap_stats_cache_lock:
-            # Check if cache is fresh
-            if pcap_stats_cache and pcap_stats_cache_time:
-                cache_age = (datetime.now() - pcap_stats_cache_time).total_seconds()
-                if cache_age < PCAP_STATS_CACHE_TTL:
-                    # Use cached values (fast path)
-                    pcap_size_bytes = pcap_stats_cache.get('size_bytes', 0)
-                    pcap_file_count = pcap_stats_cache.get('file_count', 0)
-                    logger.debug(f"Using cached PCAP stats (age: {cache_age:.0f}s)")
-                    # Early return - skip scanning
-                    cache_age = cache_age  # Keep value for later check
-                else:
-                    cache_age = None  # Cache is stale, need to scan
+            if pcap_stats_cache:
+                # Geef altijd cached waarden direct terug (ook als stale)
+                pcap_size_bytes = pcap_stats_cache.get('size_bytes', 0)
+                pcap_file_count = pcap_stats_cache.get('file_count', 0)
+                cache_age = (datetime.now() - pcap_stats_cache_time).total_seconds() if pcap_stats_cache_time else 9999
             else:
-                cache_age = None  # No cache yet, need to scan
+                cache_age = 9999  # Geen cache, trigger refresh
 
-            # If no cache or cache is stale, scan filesystem (while holding lock)
-            # This prevents multiple workers from scanning simultaneously
-            if cache_age is None:
-                import os
-                pcap_dir = '/var/log/netmonitor/pcap'
-
-                if os.path.exists(pcap_dir):
-                    logger.info("PCAP cache stale, scanning filesystem (this may take ~10s)...")
-                    try:
-                        # Use fast 'du' command for total size
-                        result = subprocess.run(
-                            ['du', '-sb', pcap_dir],
-                            capture_output=True,
-                            text=True,
-                            timeout=20  # 20 second timeout (increased for safety)
-                        )
-                        if result.returncode == 0:
-                            pcap_size_bytes = int(result.stdout.split()[0])
-
-                        # Use fast 'find' with wc for count (avoids loading all filenames)
-                        result = subprocess.run(
-                            "find /var/log/netmonitor/pcap -name '*.pcap' -type f | wc -l",
-                            capture_output=True,
-                            text=True,
-                            shell=True,
-                            timeout=20
-                        )
-                        if result.returncode == 0:
-                            pcap_file_count = int(result.stdout.strip())
-
-                        # Update cache (already holding lock)
-                        pcap_stats_cache = {
-                            'size_bytes': pcap_size_bytes,
-                            'file_count': pcap_file_count
-                        }
-                        pcap_stats_cache_time = datetime.now()
-                        logger.info(f"PCAP stats cached: {pcap_file_count:,} files, {pcap_size_bytes/(1024**3):.2f} GB")
-
-                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError) as e:
-                        logger.warning(f"PCAP stats scan failed: {e}")
-                        # Use old cache if available, otherwise 0
-                        if pcap_stats_cache:
-                            pcap_size_bytes = pcap_stats_cache.get('size_bytes', 0)
-                            pcap_file_count = pcap_stats_cache.get('file_count', 0)
-                            logger.info("Using stale PCAP cache due to scan failure")
+            # Start background refresh als cache verlopen is en er geen refresh loopt
+            needs_refresh = cache_age > PCAP_STATS_CACHE_TTL
+            refresh_running = pcap_stats_refresh_thread and pcap_stats_refresh_thread.is_alive()
+            if needs_refresh and not refresh_running:
+                pcap_stats_refresh_thread = threading.Thread(target=_refresh_pcap_stats, daemon=True)
+                pcap_stats_refresh_thread.start()
+                logger.debug(f"PCAP cache verlopen ({cache_age:.0f}s), achtergrond refresh gestart")
 
         # Format sizes
         def format_bytes(bytes_val):

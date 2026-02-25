@@ -731,6 +731,13 @@ class ThreatDetector:
         src_ip = ip_layer.src
         dst_port = tcp_layer.dport
 
+        # Ephemeral ports (>32767) negeren: dit zijn client source ports,
+        # geen service-poorten. Een echte port scan richt zich op bekende
+        # service-poorten (22, 80, 443, etc.), niet op hoge random poorten.
+        # Dit voorkomt false positives bij NAT/SPAN verkeer.
+        if dst_port > 32767:
+            return None
+
         # Track poorten per source IP
         tracker = self.port_scan_tracker[src_ip]
         current_time = time.time()
@@ -1449,12 +1456,18 @@ class ThreatDetector:
                     })
 
         # Check for FTP on non-standard ports
+        # Let op: '220 ' en 'USER '/'PASS ' komen ook voor in SMTP/POP3/IMAP.
+        # Sluit mail-poorten uit om false positives op mailservers te voorkomen.
         if packet.haslayer(Raw):
             try:
                 payload = packet[Raw].load
                 # FTP commands (USER, PASS, etc.)
                 if any(payload.startswith(cmd) for cmd in [b'USER ', b'PASS ', b'220 ', b'331 ']):
-                    if dst_port not in {20, 21} and src_port not in {20, 21}:
+                    # Exclude known mail protocol ports (SMTP/POP3/IMAP) where these
+                    # commands also appear legitimately
+                    mail_ports = {25, 110, 143, 465, 587, 993, 995, 2525}
+                    if (dst_port not in {20, 21} and src_port not in {20, 21}
+                            and src_port not in mail_ports and dst_port not in mail_ports):
                         threats.append({
                             'type': 'FTP_NON_STANDARD_PORT',
                             'severity': 'MEDIUM',
@@ -3812,11 +3825,14 @@ class ThreatDetector:
         current_time = time.time()
 
         # Cleanup port scan tracker
+        max_ports_tracked = 200  # Begrenzing onbegrensde 'ports' set
         for ip in list(self.port_scan_tracker.keys()):
             tracker = self.port_scan_tracker[ip]
             if tracker['last_seen'] and \
                (current_time - tracker['last_seen']) > 300:  # 5 minuten
                 del self.port_scan_tracker[ip]
+            elif len(tracker['ports']) > max_ports_tracked:
+                tracker['ports'] = set(list(tracker['ports'])[-max_ports_tracked:])
 
         # Cleanup SMTP/FTP tracker
         for key in list(self.smtp_ftp_tracker.keys()):
@@ -3843,14 +3859,12 @@ class ThreatDetector:
                (current_time - tracker['last_seen']) > 300:  # 5 minuten
                 del self.cryptomining_tracker[ip]
 
-        # Cleanup DNS query tracker
+        # Cleanup DNS query tracker - verwijder verlopen entries volledig
         for ip in list(self.dns_query_tracker.keys()):
             tracker = self.dns_query_tracker[ip]
-            # Reset window if older than time_window
             if tracker['window_start'] and \
                (current_time - tracker['window_start']) > 120:  # 2 minuten
-                tracker['unique_domains'].clear()
-                tracker['window_start'] = None
+                del self.dns_query_tracker[ip]
 
         # Cleanup Phase 2: Web Application Security trackers
         for ip in list(self.sqli_tracker.keys()):
@@ -3881,8 +3895,7 @@ class ThreatDetector:
             tracker = self.api_abuse_tracker[ip]
             if tracker['window_start'] and \
                (current_time - tracker['window_start']) > 120:  # 2 minuten
-                tracker['endpoints'].clear()
-                tracker['window_start'] = None
+                del self.api_abuse_tracker[ip]
 
         # Cleanup Phase 3: DDoS & Resource Exhaustion trackers
         for ip in list(self.syn_flood_tracker.keys()):
@@ -4063,19 +4076,35 @@ class ThreatDetector:
         if tls_cache_cleaned > 0:
             self.logger.debug(f"TLS cache: {tls_cache_cleaned} oude entries verwijderd, {len(self.tls_metadata_cache)} over")
 
-        # Cleanup connection tracker - remove empty entries
+        # Cleanup connection tracker - verwijder inactieve IPs (niet alleen lege deques)
+        # Deques met maxlen=10000 zijn nooit leeg voor actieve IPs → sleutels stapelen op
+        conn_cutoff = current_time - 300  # 5 minuten inactief
         conn_tracker_cleaned = 0
         for ip in list(self.connection_tracker.keys()):
-            if not self.connection_tracker[ip]:  # Empty deque
+            deq = self.connection_tracker[ip]
+            if not deq or deq[-1] < conn_cutoff:
                 del self.connection_tracker[ip]
                 conn_tracker_cleaned += 1
 
-        # Cleanup ontbrekende deque-based trackers - verwijder lege deques
+        # Cleanup deque-based trackers - verwijder inactieve IPs (niet alleen lege deques)
+        # Met maxlen zijn deze nooit leeg voor actieve IPs → sleutels stapelen op
+        # Let op: dns_tracker slaat floats op, icmp_tracker/http_tracker slaan dicts op
+        deque_cutoff = current_time - 300  # 5 minuten inactief
         for tracker_name in ('dns_tracker', 'icmp_tracker', 'http_tracker', 'protocol_mismatch_tracker'):
             tracker = getattr(self, tracker_name, None)
             if tracker is not None:
-                empty_keys = [ip for ip in list(tracker.keys()) if not tracker[ip]]
-                for ip in empty_keys:
+                stale_keys = []
+                for ip in list(tracker.keys()):
+                    deq = tracker[ip]
+                    if not deq:
+                        stale_keys.append(ip)
+                    else:
+                        last = deq[-1]
+                        # dns_tracker stores floats; icmp/http_tracker store dicts with 'time'
+                        ts = last['time'] if isinstance(last, dict) else last
+                        if ts < deque_cutoff:
+                            stale_keys.append(ip)
+                for ip in stale_keys:
                     del tracker[ip]
 
         # Cleanup smart_home_tracker - verwijder entries met verlopen window_start
